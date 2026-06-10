@@ -162,6 +162,9 @@ wandb/
 # Dev scripts
 .dev/
 
+# Local test files (not for remote)
+_local_tests/
+
 # Data folders
 data/
 outputs/
