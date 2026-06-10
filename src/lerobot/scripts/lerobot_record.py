@@ -87,9 +87,18 @@ lerobot-record \\
 """
 
 import logging
+import os
+import platform
 import time
 from dataclasses import asdict, dataclass
 from pprint import pformat
+
+# Must be set BEFORE cv2 import. On Windows, MSMF backend hangs without this.
+# See: https://github.com/huggingface/lerobot/pull/1495
+if platform.system() == "Windows" and "OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS" not in os.environ:
+    os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
+
+import cv2
 
 from lerobot.cameras import CameraConfig  # noqa: F401
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
@@ -159,7 +168,6 @@ from lerobot.utils.utils import (
     init_logging,
     log_say,
 )
-from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 
 @dataclass
@@ -174,8 +182,6 @@ class RecordConfig:
     display_ip: str | None = None
     # Port of the remote Rerun server
     display_port: int | None = None
-    # Whether to  display compressed images in Rerun
-    display_compressed_images: bool = False
     # Use vocal synthesis to read events.
     play_sounds: bool = True
     # Resume recording on an existing dataset.
@@ -235,7 +241,6 @@ def record_loop(
     control_time_s: int | None = None,
     single_task: str | None = None,
     display_data: bool = False,
-    display_compressed_images: bool = False,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -329,9 +334,14 @@ def record_loop(
             dataset.add_frame(frame)
 
         if display_data:
-            log_rerun_data(
-                observation=obs_processed, action=action_values, compress_images=display_compressed_images
-            )
+            image_keys = [key for key in obs if key in robot.cameras]
+            for i, key in enumerate(image_keys):
+                cv2.imshow(key, cv2.cvtColor(obs[key], cv2.COLOR_RGB2BGR))
+                # Position windows side by side and keep them on top
+                x = 100 + i * 660
+                cv2.moveWindow(key, x, 50)
+                cv2.setWindowProperty(key, cv2.WND_PROP_TOPMOST, 1)
+            cv2.waitKey(1)
 
         dt_s = time.perf_counter() - start_loop_t
 
@@ -355,13 +365,6 @@ def record(
 ) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
-    if cfg.display_data:
-        init_rerun(session_name="recording", ip=cfg.display_ip, port=cfg.display_port)
-    display_compressed_images = (
-        True
-        if (cfg.display_data and cfg.display_ip is not None and cfg.display_port is not None)
-        else cfg.display_compressed_images
-    )
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -464,7 +467,6 @@ def record(
                     control_time_s=cfg.dataset.episode_time_s,
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
-                    display_compressed_images=display_compressed_images,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment

@@ -155,7 +155,17 @@ class OpenCVCamera(Camera):
         # blocking in multi-threaded applications, especially during data collection.
         cv2.setNumThreads(1)
 
-        self.videocapture = cv2.VideoCapture(self.index_or_path, self.backend)
+        backend = self.backend
+        # On Windows, CAP_ANY defaults to MSMF which can be slow to open.
+        # Explicitly use CAP_MSMF with HW_TRANSFORMS disabled for reliable fast connection (~2s).
+        # See: https://github.com/huggingface/lerobot/pull/1495
+        if platform.system() == "Windows" and backend == cv2.CAP_ANY:
+            backend = cv2.CAP_MSMF
+
+        # Update self.backend so _configure_capture_settings sees the actual backend used
+        self.backend = backend
+
+        self.videocapture = cv2.VideoCapture(self.index_or_path, backend)
 
         if not self.videocapture.isOpened():
             self.videocapture.release()
@@ -202,9 +212,26 @@ class OpenCVCamera(Camera):
         if self.videocapture is None:
             raise DeviceNotConnectedError(f"{self} videocapture is not initialized")
 
-        set_fourcc_after_size_and_fps = platform.system() == "Windows"
+        is_windows = platform.system() == "Windows"
+        is_dshow = is_windows and self.backend == cv2.CAP_DSHOW
+        set_fourcc_after_size_and_fps = is_windows
+        # On Windows, set MJPG before resolution to reduce USB bandwidth.
+        # Without this, two cameras at 640x480@30fps will exceed USB 2.0 bandwidth.
+        # DSHOW handles FOURCC differently (set AFTER resolution), so only set MJPG here for non-DSHOW.
+        # This matches genkiarm's approach: MSMF/ANY get MJPG first, DSHOW gets FOURCC last.
+        use_mjpg_first = is_windows and not is_dshow and self.config.fourcc is None
+        if use_mjpg_first:
+            self.videocapture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         if self.config.fourcc is not None and not set_fourcc_after_size_and_fps:
             self._validate_fourcc()
+
+        # Set FPS BEFORE width/height. On MSMF, setting resolution without
+        # first setting FPS can cause the camera pipeline to block indefinitely.
+        # This matches genkiarm's approach and the PR #1495 fix.
+        if self.fps is None:
+            self.fps = self.videocapture.get(cv2.CAP_PROP_FPS)
+        else:
+            self._validate_fps()
 
         default_width = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_WIDTH)))
         default_height = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
@@ -217,11 +244,6 @@ class OpenCVCamera(Camera):
                 self.capture_width, self.capture_height = default_width, default_height
         else:
             self._validate_width_and_height()
-
-        if self.fps is None:
-            self.fps = self.videocapture.get(cv2.CAP_PROP_FPS)
-        else:
-            self._validate_fps()
 
         if self.config.fourcc is not None and set_fourcc_after_size_and_fps:
             # On Windows with DSHOW, changing the resolution can silently override the FOURCC setting.
