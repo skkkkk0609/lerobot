@@ -1,0 +1,8 @@
+print("=" * 50)
+print("这是一个简单的 Python 测试")
+print("=" * 50)
+print()
+print("如果你能看到这段话，说明 Python 运行正常！")
+print()
+print("按回车键退出...")
+input()
